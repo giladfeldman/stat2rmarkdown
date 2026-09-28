@@ -11,6 +11,7 @@
 #' @param x Value to check.
 #' @param y Default value to return if `x` is `NULL`.
 #' @return `x` if not `NULL`, otherwise `y`.
+#' @name null-coalesce
 #' @export
 #' @examples
 #' # Returns the non-NULL value

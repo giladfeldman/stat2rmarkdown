@@ -25,8 +25,9 @@ of statistical software to R Markdown converter packages:
 - `jasp2rmarkdown` -- JASP .jasp to R Markdown
 - `jamovi2rmarkdown` -- jamovi .omv to R Markdown
 
-By extracting common code into this shared core, we reduce duplication and
-ensure consistent behavior across all converters.
+The converters do not currently import this package: each carries its own copy
+of the equivalent helpers, and `render_jmv_tables()` here is the reference
+implementation those copies are kept in step with.
 
 ## Utility Functions
 

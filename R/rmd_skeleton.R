@@ -41,14 +41,197 @@ output:
     theme: {theme}
     highlight: tango
     toc: true
+    toc_depth: 4
     toc_float:
-      collapsed: false
+      collapsed: true
       smooth_scroll: true
     code_folding: hide
     self_contained: true
     df_print: paged
 ---
 ')
+}
+
+
+#' Generate an inline CSS style block for the knitted HTML report
+#'
+#' @title Generate style block
+#' @description Returns a raw `<style>` block (as a length-1 character string)
+#'   to be emitted immediately after the YAML header in the document body.
+#'   Because it is inline, `self_contained: true` keeps it embedded in the
+#'   single output file with no extra dependency. It provides a readable font
+#'   stack, comfortable line-height, and clean styling for the statistical
+#'   tables emitted by [render_jmv_tables()] (class `s2r-table`) plus any
+#'   residual verbatim (`pre`) output.
+#' @return Character string containing a `<style>...</style>` block followed by
+#'   a trailing blank line.
+#' @export
+generate_style_block <- function() {
+  paste0(
+    "<style>\n",
+    "body, .main-container { font-family: -apple-system, BlinkMacSystemFont, ",
+    "'Segoe UI', Roboto, Helvetica, Arial, sans-serif; ",
+    "font-size: 15px; line-height: 1.6; color: #1f2933; }\n",
+    ".main-container { max-width: 960px; }\n",
+    "h1, h2, h3, h4 { font-weight: 600; line-height: 1.25; margin-top: 1.6em; }\n",
+    "h1 { font-size: 1.7em; } h2 { font-size: 1.4em; } ",
+    "h3 { font-size: 1.18em; } h4 { font-size: 1.02em; color: #3e4c59; }\n",
+    "table.s2r-table { border-collapse: collapse; margin: 0.6em 0 1.4em; ",
+    "font-size: 0.92em; width: auto; }\n",
+    "table.s2r-table th, table.s2r-table td { padding: 6px 12px; ",
+    "border: 1px solid #e4e7eb; text-align: right; }\n",
+    "table.s2r-table th { background: #f5f7fa; font-weight: 600; ",
+    "text-align: left; }\n",
+    "table.s2r-table td:first-child, table.s2r-table th:first-child { ",
+    "text-align: left; }\n",
+    "table.s2r-table tbody tr:nth-child(even) { background: #fafbfc; }\n",
+    "pre { white-space: pre-wrap; word-break: break-word; font-size: 0.85em; ",
+    "background: #f5f7fa; border-radius: 6px; padding: 12px; }\n",
+    "code { font-size: 0.88em; }\n",
+    "</style>\n\n"
+  )
+}
+
+
+#' Render every statistical table inside a jmv result object as HTML
+#'
+#' @title Render jmv tables as HTML
+#' @description Recursively walks a jmv results object (from `jmv::ttestIS`,
+#'   `jmv::ANOVA`, `jmv::descriptives`, etc.) and emits each `Table` element as
+#'   a real HTML table via [knitr::kable()] (which ships with knitr -- no extra
+#'   dependency). This replaces the default auto-printed console output, whose
+#'   Unicode box-drawing rule lines render as mojibake (`a-circumflex` byte pairs) when the worker
+#'   locale is not UTF-8, and which is far less readable than a styled table.
+#'
+#'   Intended to be called from an analysis chunk with the `results='asis'`
+#'   chunk option so the kable HTML is passed through verbatim.
+#'
+#' @param x A jmv results object (or any element/group within one).
+#' @param heading_level Integer markdown heading level for each table's title.
+#'   Defaults to 4 (matches `toc_depth: 4`).
+#' @param .depth Internal recursion-depth guard. Do not set.
+#' @return Invisibly `NULL`; called for its side effect of `cat()`-ing HTML.
+#' @export
+render_jmv_tables <- function(x, heading_level = 4, .depth = 0L) {
+  if (.depth > 8L) return(invisible())
+  if (inherits(x, "Table")) {
+    # jmv includes structural tables (Levene's, Shapiro-Wilk, itemReliability,
+    # etc.) in the results object even when the corresponding option was not
+    # requested; it flags them `visible = FALSE` and its own UI hides them.
+    # Rendering them anyway emits shells full of "." placeholder cells that
+    # have no counterpart in jamovi's own output. Honour `$visible`: skip a
+    # table only when it is *definitively* not visible (never on NA/error, to
+    # stay conservative for Table-likes without the property).
+    vis <- tryCatch(x$visible, error = function(e) NULL)
+    if (is.logical(vis) && length(vis) == 1L && !is.na(vis) && !isTRUE(vis)) {
+      return(invisible())
+    }
+    # Parse jmv's own correctly-laid-out asString() (variables/stats oriented
+    # as jamovi intends) into HTML. asDF is transposed/flat for some table
+    # types (e.g. descriptives), so asString is the better source.
+    s <- tryCatch(x$asString(), error = function(e) NULL)
+    h <- .jmv_asstring_to_html(s)
+    if (is.null(h)) {
+      if (!is.null(s) && nzchar(s)) cat("\n\n```\n", s, "\n```\n\n", sep = "")
+      return(invisible())
+    }
+    cat("\n\n", h, "\n\n", sep = "")
+    return(invisible())
+  }
+  # Recurse ONLY into Group/Array (NOT the broad ResultsElement class -- every
+  # element incl. Table is a ResultsElement, and some leaves recurse forever).
+  if (inherits(x, "Group") || inherits(x, "Array")) {
+    nms <- tryCatch(names(x), error = function(e) NULL)
+    if (!is.null(nms)) {
+      for (nm in nms) {
+        child <- tryCatch(x[[nm]], error = function(e) NULL)
+        if (!is.null(child)) render_jmv_tables(child, heading_level, .depth + 1L)
+      }
+    }
+    return(invisible())
+  }
+  if (is.data.frame(x)) {
+    cat("\n\n", knitr::kable(x, format = "html", escape = FALSE,
+        table.attr = 'class="s2r-table"'), "\n\n", sep = "")
+  }
+  invisible()
+}
+
+#' Parse a jmv Table$asString() ASCII layout into a clean HTML table string.
+#' @keywords internal
+.jmv_asstring_to_html <- function(s) {
+  if (is.null(s) || !nzchar(s)) return(NULL)
+  lines <- strsplit(s, "\n", fixed = TRUE)[[1]]
+  is_sep <- function(l) nchar(gsub("[[:space:]\u2500-\u257f]", "", l, perl = TRUE)) == 0L
+  content <- lines[!vapply(lines, is_sep, logical(1))]
+  content <- content[nchar(trimws(content)) > 0]
+  if (length(content) < 2L) return(NULL)
+  title <- trimws(content[[1]])
+  header_line <- content[[2]]
+  row_lines <- if (length(content) >= 3L) content[3:length(content)] else character(0)
+  split_cols <- function(l) {
+    parts <- strsplit(sub("^\\s+", "", l), "\\s{2,}", perl = TRUE)[[1]]
+    parts[nchar(parts) > 0]
+  }
+  header <- split_cols(header_line)
+  rows <- lapply(row_lines, split_cols)
+  ncol_max <- max(c(length(header), vapply(rows, length, integer(1))), 0L)
+  if (ncol_max < 1L) return(NULL)
+  if (length(header) < ncol_max) header <- c(rep("", ncol_max - length(header)), header)
+  esc <- function(x) {
+    x <- gsub("&", "&amp;", x, fixed = TRUE)
+    x <- gsub("<", "&lt;", x, fixed = TRUE)
+    gsub(">", "&gt;", x, fixed = TRUE)
+  }
+  th <- paste0("<th>", esc(header), "</th>", collapse = "")
+  body <- vapply(rows, function(r) {
+    r <- c(r, rep("", ncol_max - length(r)))
+    paste0("<tr>", paste0("<td>", esc(r), "</td>", collapse = ""), "</tr>")
+  }, character(1))
+  cap <- if (nzchar(title)) paste0("<caption>", esc(title), "</caption>") else ""
+  paste0('<table class="s2r-table">', cap, "<thead><tr>", th,
+         "</tr></thead><tbody>", paste(body, collapse = ""), "</tbody></table>")
+}
+
+
+#' Render a fitted model as an HTML coefficient table
+#'
+#' @title Render model table as HTML
+#' @description Emits a fitted model (`lm`, `glm`, `fixest`, `lmer`, ...) as a
+#'   styled HTML table. Prefers `modelsummary::msummary(output = "html")` when
+#'   installed; falls back to
+#'   `broom::tidy()` + [knitr::kable()]; and finally to a plain `print(summary())`
+#'   (ASCII -- no mojibake) for model classes neither library supports. Intended
+#'   for use in a `results='asis'` chunk.
+#'
+#' @param model A fitted model object.
+#' @return Invisibly `NULL`; called for its `cat()` side effect.
+#' @export
+render_model_table <- function(model) {
+  if (requireNamespace("modelsummary", quietly = TRUE)) {
+    out <- tryCatch(
+      as.character(modelsummary::msummary(model, output = "html")),
+      error = function(e) NULL
+    )
+    if (!is.null(out)) {
+      cat(out, "\n\n", sep = "")
+      return(invisible())
+    }
+  }
+  if (requireNamespace("broom", quietly = TRUE)) {
+    td <- tryCatch(broom::tidy(model), error = function(e) NULL)
+    if (!is.null(td) && nrow(td) > 0L) {
+      cat(
+        knitr::kable(td, format = "html", escape = FALSE,
+                     table.attr = 'class="s2r-table"'),
+        "\n\n",
+        sep = ""
+      )
+      return(invisible())
+    }
+  }
+  print(summary(model))
+  invisible()
 }
 
 
@@ -88,7 +271,7 @@ generate_setup_chunk <- function(packages = c("haven", "dplyr", "tidyr",
     fig.width = 10,
     fig.height = 7
   )
-  opts <- modifyList(defaults, options)
+  opts <- utils::modifyList(defaults, options)
 
   # Build knitr options string
   opts_lines <- vapply(names(opts), function(nm) {
@@ -136,7 +319,7 @@ generate_setup_chunk <- function(packages = c("haven", "dplyr", "tidyr",
 #' @param tool_name Character string. Name of the converter tool to credit in
 #'   the footer. Defaults to `"stat2rmarkdown"`.
 #' @param repo_url Character string. URL for the tool repository. Defaults to
-#'   `"https://github.com/giladfeldman/2rmarkdown"`.
+#'   `"https://github.com/giladfeldman/stat2rmarkdown"`.
 #' @return Character string containing the session info section as R Markdown.
 #' @export
 #' @examples
@@ -146,7 +329,7 @@ generate_setup_chunk <- function(packages = c("haven", "dplyr", "tidyr",
 #'   repo_url = "https://github.com/giladfeldman/STATA2Rmarkdown"
 #' ))
 generate_session_footer <- function(tool_name = "stat2rmarkdown",
-                                    repo_url = "https://github.com/giladfeldman/2rmarkdown") {
+                                    repo_url = "https://github.com/giladfeldman/stat2rmarkdown") {
   paste0(
     "\n---\n\n",
     "# Session Info\n\n",
